@@ -3,11 +3,20 @@ from pathlib import Path
 import io
 
 import joblib
+import numpy as np
 import pandas as pd
 
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictFloat, StrictInt, StrictStr
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StrictBool,
+    StrictFloat,
+    StrictInt,
+    StrictStr,
+)
 from sklearn.base import clone
 
 
@@ -16,7 +25,7 @@ API_FOLDER = Path(__file__).resolve().parent
 MODEL_PATH = API_FOLDER / "best_model.pkl"
 TRAINING_DATA_PATH = API_FOLDER / "training_data.csv"
 
-# Input features and target
+# Model input columns
 FEATURE_COLUMNS = [
     "Country",
     "Year",
@@ -27,37 +36,52 @@ FEATURE_COLUMNS = [
     "Lag1Day",
     "Lag7Days",
     "Rolling7Days",
-    "Rolling30Days"
+    "Rolling30Days",
 ]
 
 TARGET_COLUMN = "DailyRevenue"
+REQUIRED_COLUMNS = FEATURE_COLUMNS + [TARGET_COLUMN]
 
-# Load the saved machine learning pipeline
+NUMERIC_COLUMNS = [
+    "Year",
+    "Month",
+    "Day",
+    "DayOfWeek",
+    "IsWeekend",
+    "Lag1Day",
+    "Lag7Days",
+    "Rolling7Days",
+    "Rolling30Days",
+    "DailyRevenue",
+]
+
+# Load the saved model
 model = joblib.load(MODEL_PATH)
 
-# Create the FastAPI application
+
 app = FastAPI(
     title="Daily Retail Revenue Prediction API",
     description="API for predicting daily retail revenue using a Random Forest model.",
-    version="1.0.0"
+    version="1.0.0",
 )
 
-# Configure CORS
+
+# CORS configuration
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "http://localhost:3000",
         "http://localhost:8000",
         "http://127.0.0.1:3000",
-        "http://127.0.0.1:8000"
+        "http://127.0.0.1:8000",
     ],
     allow_methods=["GET", "POST"],
     allow_headers=["Content-Type", "Authorization"],
-    allow_credentials=True
+    allow_credentials=True,
 )
 
 
-# Define and validate prediction inputs
+# Prediction input validation
 class PredictionInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -73,7 +97,6 @@ class PredictionInput(BaseModel):
     Rolling30Days: StrictFloat = Field(ge=0)
 
 
-# Root endpoint
 @app.get("/")
 def home():
     return {
@@ -81,211 +104,210 @@ def home():
     }
 
 
-# Prediction endpoint
+# Predict daily revenue
 @app.post("/predict")
 def predict_revenue(data: PredictionInput):
     input_data = pd.DataFrame([data.model_dump()])
-
     prediction = model.predict(input_data)[0]
 
     return {
         "country": data.Country,
         "predicted_daily_revenue": round(float(prediction), 2),
-        "currency": "GBP"
+        "currency": "GBP",
     }
 
 
-# Retraining endpoint
+# Validate the uploaded CSV file
+def validate_training_data(data: pd.DataFrame):
+    missing_columns = [
+        column for column in REQUIRED_COLUMNS
+        if column not in data.columns
+    ]
+
+    extra_columns = [
+        column for column in data.columns
+        if column not in REQUIRED_COLUMNS
+    ]
+
+    if missing_columns:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Missing columns: {missing_columns}",
+        )
+
+    if extra_columns:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unexpected columns: {extra_columns}",
+        )
+
+    if data.empty:
+        raise HTTPException(
+            status_code=400,
+            detail="The uploaded CSV file has no data rows.",
+        )
+
+    if data[REQUIRED_COLUMNS].isnull().any().any():
+        raise HTTPException(
+            status_code=400,
+            detail="The CSV file contains missing values.",
+        )
+
+    data = data[REQUIRED_COLUMNS].copy()
+
+    data["Country"] = data["Country"].astype(str).str.strip()
+
+    if (data["Country"] == "").any():
+        raise HTTPException(
+            status_code=400,
+            detail="Country values cannot be empty.",
+        )
+
+    for column in NUMERIC_COLUMNS:
+        data[column] = pd.to_numeric(
+            data[column],
+            errors="coerce",
+        )
+
+    if data[NUMERIC_COLUMNS].isnull().any().any():
+        raise HTTPException(
+            status_code=400,
+            detail="Some numerical columns contain invalid values.",
+        )
+
+    if not np.isfinite(data[NUMERIC_COLUMNS].to_numpy()).all():
+        raise HTTPException(
+            status_code=400,
+            detail="Numerical values must be finite.",
+        )
+
+    integer_columns = [
+        "Year",
+        "Month",
+        "Day",
+        "DayOfWeek",
+        "IsWeekend",
+    ]
+
+    for column in integer_columns:
+        values = data[column].to_numpy()
+
+        if not np.equal(values, np.floor(values)).all():
+            raise HTTPException(
+                status_code=400,
+                detail=f"{column} must contain whole numbers.",
+            )
+
+    if not data["Year"].between(2009, 2035).all():
+        raise HTTPException(status_code=400, detail="Year must be between 2009 and 2035.")
+
+    if not data["Month"].between(1, 12).all():
+        raise HTTPException(status_code=400, detail="Month must be between 1 and 12.")
+
+    if not data["Day"].between(1, 31).all():
+        raise HTTPException(status_code=400, detail="Day must be between 1 and 31.")
+
+    if not data["DayOfWeek"].between(0, 6).all():
+        raise HTTPException(status_code=400, detail="DayOfWeek must be between 0 and 6.")
+
+    if not data["IsWeekend"].isin([0, 1]).all():
+        raise HTTPException(status_code=400, detail="IsWeekend must be 0 or 1.")
+
+    nonnegative_columns = [
+        "Lag1Day",
+        "Lag7Days",
+        "Rolling7Days",
+        "Rolling30Days",
+        "DailyRevenue",
+    ]
+
+    for column in nonnegative_columns:
+        if (data[column] < 0).any():
+            raise HTTPException(
+                status_code=400,
+                detail=f"{column} cannot contain negative values.",
+            )
+
+    return data
+
+
+# Retrain the model using an uploaded CSV file
 @app.post("/retrain")
 async def retrain_model(file: UploadFile = File(...)):
     global model
 
-    # Check that the uploaded file is a CSV
     if not file.filename or not file.filename.lower().endswith(".csv"):
         raise HTTPException(
             status_code=400,
-            detail="Please upload a CSV file."
+            detail="Please upload a CSV file.",
         )
 
-    # Check that the original training data exists
-    if not TRAINING_DATA_PATH.exists():
+    contents = await file.read()
+
+    if not contents:
         raise HTTPException(
-            status_code=500,
-            detail="Original training data file was not found."
+            status_code=400,
+            detail="The uploaded file is empty.",
+        )
+
+    if len(contents) > 20 * 1024 * 1024:
+        raise HTTPException(
+            status_code=413,
+            detail="The uploaded file is too large. Maximum size is 20 MB.",
         )
 
     try:
-        # Read the uploaded CSV file
-        contents = await file.read()
-
-        if not contents:
-            raise HTTPException(
-                status_code=400,
-                detail="The uploaded CSV file is empty."
-            )
-
-        new_data = pd.read_csv(io.BytesIO(contents))
-
-        if new_data.empty:
-            raise HTTPException(
-                status_code=400,
-                detail="The uploaded CSV contains no records."
-            )
-
-        # Check required columns
-        required_columns = FEATURE_COLUMNS + [TARGET_COLUMN]
-        missing_columns = [
-            column for column in required_columns
-            if column not in new_data.columns
-        ]
-
-        if missing_columns:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Missing columns: {missing_columns}"
-            )
-
-        # Keep only the required columns
-        new_data = new_data[required_columns].copy()
-
-        # Validate Country
-        if new_data["Country"].isna().any():
-            raise HTTPException(
-                status_code=400,
-                detail="Country cannot be empty."
-            )
-
-        new_data["Country"] = new_data["Country"].astype(str).str.strip()
-
-        if (new_data["Country"] == "").any():
-            raise HTTPException(
-                status_code=400,
-                detail="Country cannot be empty."
-            )
-
-        # Validate the weekend field
-        weekend_values = {
-            True: True,
-            False: False,
-            "True": True,
-            "False": False,
-            "true": True,
-            "false": False,
-            1: True,
-            0: False
-        }
-
-        new_data["IsWeekend"] = new_data["IsWeekend"].map(weekend_values)
-
-        if new_data["IsWeekend"].isna().any():
-            raise HTTPException(
-                status_code=400,
-                detail="IsWeekend must contain True or False."
-            )
-
-        # Convert numeric columns
-        numeric_columns = [
-            "Year", "Month", "Day", "DayOfWeek",
-            "Lag1Day", "Lag7Days", "Rolling7Days",
-            "Rolling30Days", TARGET_COLUMN
-        ]
-
-        for column in numeric_columns:
-            new_data[column] = pd.to_numeric(
-                new_data[column], errors="coerce"
-            )
-
-        if new_data[numeric_columns].isna().any().any():
-            raise HTTPException(
-                status_code=400,
-                detail="Numeric columns must contain valid numbers."
-            )
-
-        # Check integer fields
-        integer_columns = ["Year", "Month", "Day", "DayOfWeek"]
-
-        for column in integer_columns:
-            if (new_data[column] % 1 != 0).any():
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"{column} must contain whole numbers."
-                )
-
-        # Validate realistic ranges
-        if not new_data["Year"].between(2009, 2035).all():
-            raise HTTPException(status_code=400, detail="Year must be between 2009 and 2035.")
-
-        if not new_data["Month"].between(1, 12).all():
-            raise HTTPException(status_code=400, detail="Month must be between 1 and 12.")
-
-        if not new_data["Day"].between(1, 31).all():
-            raise HTTPException(status_code=400, detail="Day must be between 1 and 31.")
-
-        if not new_data["DayOfWeek"].between(0, 6).all():
-            raise HTTPException(status_code=400, detail="DayOfWeek must be between 0 and 6.")
-
-        non_negative_columns = [
-            "Lag1Day", "Lag7Days", "Rolling7Days",
-            "Rolling30Days", TARGET_COLUMN
-        ]
-
-        for column in non_negative_columns:
-            if (new_data[column] < 0).any():
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"{column} cannot be negative."
-                )
-
-        # Check that calendar dates are valid
-        dates = pd.to_datetime(
-            new_data[["Year", "Month", "Day"]].rename(
-                columns={"Year": "year", "Month": "month", "Day": "day"}
-            ),
-            errors="coerce"
+        uploaded_data = pd.read_csv(io.BytesIO(contents))
+    except Exception:
+        raise HTTPException(
+            status_code=400,
+            detail="Could not read the uploaded CSV file.",
         )
 
-        if dates.isna().any():
-            raise HTTPException(
-                status_code=400,
-                detail="The CSV contains invalid calendar dates."
-            )
+    uploaded_data = validate_training_data(uploaded_data)
 
-        # Load the original training data
+    if not TRAINING_DATA_PATH.exists():
+        raise HTTPException(
+            status_code=500,
+            detail="Original training data file was not found.",
+        )
+
+    try:
         original_data = pd.read_csv(TRAINING_DATA_PATH)
+        original_data = validate_training_data(original_data)
 
-        # Combine original and newly uploaded records
         combined_data = pd.concat(
-            [original_data[required_columns], new_data],
-            ignore_index=True
+            [original_data, uploaded_data],
+            ignore_index=True,
         )
 
-        # Create an unfitted copy of the existing pipeline
-        updated_model = clone(model)
+        X = combined_data[FEATURE_COLUMNS]
+        y = combined_data[TARGET_COLUMN]
 
-        # Retrain the model using the combined dataset
-        updated_model.fit(
-            combined_data[FEATURE_COLUMNS],
-            combined_data[TARGET_COLUMN]
-        )
+        # Create a fresh copy of the existing model pipeline
+        retrained_model = clone(model)
 
-        # Save the updated model
-        joblib.dump(updated_model, MODEL_PATH)
+        # Train using the original and newly uploaded data
+        retrained_model.fit(X, y)
 
-        # Replace the model used by the prediction endpoint
-        model = updated_model
+        # Save the updated model and combined training data
+        joblib.dump(retrained_model, MODEL_PATH)
+        combined_data.to_csv(TRAINING_DATA_PATH, index=False)
+
+        # Use the newly trained model for future predictions
+        model = retrained_model
 
         return {
             "message": "Model retrained successfully.",
-            "original_training_rows": len(original_data),
-            "new_rows_added": len(new_data),
-            "total_training_rows": len(combined_data)
+            "uploaded_rows": len(uploaded_data),
+            "total_training_rows": len(combined_data),
+            "model_file": "best_model.pkl",
         }
 
     except HTTPException:
         raise
-
     except Exception as error:
         raise HTTPException(
-            status_code=400,
-            detail=f"Could not retrain the model: {str(error)}"
+            status_code=500,
+            detail=f"Model retraining failed: {str(error)}",
         )
