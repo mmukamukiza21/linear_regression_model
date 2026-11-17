@@ -23,3 +23,19 @@ summative/linear_regression/data/
 # Operating system files
 .DS_Store
 Thumbs.db
+
+# IDE files
+.idea/
+
+# Flutter generated files
+summative/FlutterApp/.dart_tool/
+summative/FlutterApp/build/
+summative/FlutterApp/.flutter-plugins
+summative/FlutterApp/.flutter-plugins-dependencies
+summative/FlutterApp/.packages
+summative/FlutterApp/**/ephemeral/
+summative/FlutterApp/android/.gradle/
+summative/FlutterApp/ios/Flutter/Generated.xcconfig
+summative/FlutterApp/ios/Flutter/flutter_export_environment.sh
+
+summative/FlutterApp/flutter_run_log.txt
